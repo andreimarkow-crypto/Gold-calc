@@ -21,12 +21,25 @@ jobs:
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: 8.5
 
-    - name: Build APK with Gradle
-      run: gradle assembleDebug --stacktrace
+    - name: Check and build
+      run: |
+        # Проверяем, не лежат ли файлы внутри вложенной папки
+        if [ ! -f "build.gradle" ]; then
+          NESTED_DIR=$(find . -maxdepth 2 -name "build.gradle" -exec dirname {} \;)
+          if [ -n "$NESTED_DIR" ]; then
+            echo "Файлы найдены во вложенной папке: $NESTED_DIR. Переходим туда..."
+            cd "$NESTED_DIR"
+          fi
+        fi
+        gradle assembleDebug --stacktrace
 
-    - name: Upload APK Artifact
+    - name: Upload APK
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: GoldCalculator-APK
-        path: app/build/outputs/apk/debug/app-debug.apk
+        path: |
+          **/build/outputs/apk/debug/*.apk
