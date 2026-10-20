@@ -19,13 +19,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.jsoup.Jsoup
 import java.text.DecimalFormat
+import java.text.DateFormat
+import java.util.Date
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,10 +46,11 @@ class MainActivity : ComponentActivity() {
 data class GoldUiState(
     val pricePerGram: Double? = null,
     val isLoading: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val lastUpdated: Long? = null
 )
 
-class GoldViewModel : ViewModel() {
+class GoldViewModel(private val repository: GoldPriceRepository = GoldPriceRepository()) : ViewModel() {
     private val _uiState = MutableStateFlow(GoldUiState())
     val uiState: StateFlow<GoldUiState> = _uiState
 
@@ -58,40 +59,19 @@ class GoldViewModel : ViewModel() {
     }
 
     fun fetchPrice() {
+        if (_uiState.value.isLoading) return
+        _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
             try {
-                val price = withContext(Dispatchers.IO) {
-                    val doc = Jsoup.connect("https://www.profinance.ru/commodities/gold")
-                        .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                        .timeout(12000)
-                        .get()
-
-                    var targetRow = doc.select("tr:has(td:contains(XAURUB_FX))").first()
-                    if (targetRow == null) {
-                        val rows = doc.select("tr")
-                        for (r in rows) {
-                            if (r.text().contains("XAURUB_FX")) {
-                                targetRow = r
-                                break
-                            }
-                        }
-                    }
-
-                    if (targetRow == null) {
-                        throw Exception("Инструмент XAURUB_FX не найден на profinance.ru")
-                    }
-
-                    val tds = targetRow.select("td")
-                    val rawText = if (tds.size > 3) tds[3].text() else tds.last()?.text() ?: ""
-                    val cleaned = rawText.replace(" ", "").replace(" ", "").replace(",", ".")
-                    cleaned.toDouble()
-                }
-                _uiState.value = GoldUiState(pricePerGram = price, isLoading = false)
-            } catch (e: Exception) {
-                _uiState.value = GoldUiState(
+                val price = repository.fetchPrice()
+                _uiState.value = GoldUiState(pricePerGram = price, lastUpdated = System.currentTimeMillis())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                // Keep the last successful quote and its timestamp when an update fails.
+                _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    errorMessage = "Ошибка обновления: ${e.localizedMessage ?: "Сбой соединения"}"
+                    errorMessage = priceErrorMessage(error)
                 )
             }
         }
@@ -138,7 +118,7 @@ fun GoldCalculatorScreen(viewModel: GoldViewModel = viewModel()) {
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "Текущая цена за 1 грамм",
+                    text = "Последняя загруженная цена за 1 грамм",
                     fontSize = 13.sp,
                     color = Color.Gray
                 )
@@ -148,16 +128,25 @@ fun GoldCalculatorScreen(viewModel: GoldViewModel = viewModel()) {
                         modifier = Modifier.size(28.dp),
                         color = Color(0xFFD4AF37)
                     )
-                } else if (state.pricePerGram != null) {
+                }
+                if (state.pricePerGram != null) {
                     Text(
                         text = "${df.format(state.pricePerGram)} ₽",
                         fontSize = 26.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFFB45309)
                     )
-                } else {
+                    state.lastUpdated?.let { timestamp ->
+                        Text(
+                            text = "Загружено: ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM).format(Date(timestamp))}",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                state.errorMessage?.let { message ->
                     Text(
-                        text = state.errorMessage ?: "Курс не загружен",
+                        text = if (state.pricePerGram != null) "$message Показан последний загруженный курс." else message,
                         color = MaterialTheme.colorScheme.error,
                         fontSize = 13.sp,
                         textAlign = TextAlign.Center
@@ -201,7 +190,7 @@ fun GoldCalculatorScreen(viewModel: GoldViewModel = viewModel()) {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "${df.format(totalCost)} ₽",
+                    text = if (state.pricePerGram != null) "${df.format(totalCost)} ₽" else "—",
                     fontSize = 32.sp,
                     fontWeight = FontWeight.Black,
                     color = Color(0xFF78350F)
